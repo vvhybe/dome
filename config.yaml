@@ -1,0 +1,51 @@
+meta:
+  repo: "git@github.com:vvhybe/dotfiles.git"
+  branch: "main"
+  strategy: "rebase"
+  path: "~/my-dotfiles"  # Customizable repo location
+
+profiles:
+  arch:
+    pacman:
+      sudo: true
+      install: "-S --noconfirm"
+      uninstall: "-R --noconfirm"
+      grepVersion: "pacman -Qi"
+    yay:
+      sudo: false
+      install: "-S"
+      uninstall: "-R"
+      grepVersion: "yay -Qi"
+
+  debian:
+    apt:
+      sudo: true
+      install: "install -y"
+      uninstall: "remove -y"
+      grepVersion: "apt show"
+    snap:
+      sudo: true
+      install: "install"
+      uninstall: "remove"
+      grepVersion: "snap info"
+    brew:
+      sudo: false
+      install: "install"
+      uninstall: "uninstall"
+      grepVersion: "brew info"
+      
+  script:
+    sudo: false
+    install: "install"
+    uninstall: "uninstall"
+    grepVersion: "echo \$VERSION"
+
+hooks:
+  pre_sync: "dome audit"
+  post_sync: "notify-send 'Dotfiles synced!'"
+  pre_install: # pre install hook
+  post_install: # post install hook
+  pre_push: # pre push hook
+  post_push: # post push hook
+  pre_pull: # pre pull hook
+  post_pull: # post pull hook

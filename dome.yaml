@@ -1,0 +1,7 @@
+version: 1.0
+
+packages:
+  arch:
+    - neovim: "0.10.5"
+  debian:
+    - neovim: "0.10.5"

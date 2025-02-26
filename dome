@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+#
+# dome: A simple package manager for dotfiles.
+#
+# Author: @vvhybe
+# Maintainer: @vvhybe
+# License: GPL-3.0
+
+readonly VERSION="v1.0.0"
+
+# Dependencies
+readonly DEPS=(
+    "yq"
+    "rsync"
+    "git"
+)
+
+# --- Core Configuration ---
+DOME_CONFIG="${HOME}/.config/dome/config.yaml"
+REPO_ROOT=$(yq e '.meta.local_path' "$DOME_CONFIG" 2>/dev/null | sed "s|~|$HOME|")
+DOME_YAML="${REPO_ROOT}/dome.yaml"
+LOCKFILE="${REPO_ROOT}/dome-lock.yaml"
+
+# --- UI Configuration ---
+declare -A COLORS=(
+    [reset]="\033[0m"
+    [bold]="\033[1m"
+    [red]="\033[31m"
+    [green]="\033[32m"
+    [yellow]="\033[33m"
+    [blue]="\033[34m"
+    [magenta]="\033[35m"
+)
+
+declare -A SYMBOLS=(
+    [check]="✓"
+    [cross]="✗"
+    [arrow]="➜"
+    [dot]="•"
+)
+
+# --- Helper/Utilities Functions ---
+enable_colors() {
+    [[ -t 1 ]] && return 0 || return 1
+}
+
+print_status() {
+    local color="$1" symbol="$2" message="$3"
+    if enable_colors; then
+        echo -e "${COLORS[bold]}${COLORS[$color]}${SYMBOLS[$symbol]} ${message}${COLORS[reset]}"
+    else
+        echo "${SYMBOLS[$symbol]} ${message}"
+    fi
+}
+
+print_success() { print_status "green" "check" "$1"; }
+print_error() { print_status "red" "cross" "$1"; }
+print_info() { print_status "blue" "arrow" "$1"; }
+print_warning() { print_status "yellow" "dot" "$1"; }
+
+detect_distro() {
+  case $(uname -s) in
+    Linux)
+      grep -Ei "^(ID_LIKE=|ID=)" /etc/os-release | awk -F= '/ID=/ { id=$2 }; /ID_LIKE=/ { like=$2 } END { print like ? like : id }' | tr -d '"'
+      ;;
+    Darwin) echo "macos" ;;
+    *) echo "unknown" ;;
+  esac
+}
+
+yaml_get() {
+  yq "$1" "$2"
+}
+
+yaml_set() {
+  yq -i "$1" "$2"
+}
+
+# --- Script Profile, Help, Documentation ---
+
+# Function to list dependencies (pipe-friendly)
+list_deps() {
+    if [[ ${#DEPS[@]} -eq 0 ]]; then
+        echo "This script has no dependencies."
+        return 0
+    fi
+
+    for dep in "${DEPS[@]}"; do
+        echo "$dep"
+    done
+}
+
+usage() {
+    cat <<EOF
+Usage: ${0##*/} [COMMAND] [OPTIONS]
+
+A minimalist dotfiles manager with cross-distro support.
+
+Commands:
+  init                Initialize dome configuration
+  install|i [-s] PKG  Install package (shared with -s)
+  remove|rm PKG       Remove package
+  update|up           Update system and packages
+  sync                Sync dotfiles with repository
+  audit               Validate configuration
+  hook HOOK_NAME      Execute specific lifecycle hook
+
+Options:
+  -h, --help      Show this help message
+  -v, --version   Show version information
+  --deps          List required dependencies
+
+Examples:
+  dome init
+  dome install -s neovim
+  dome sync
+
+Documentation: https://github.com/vvhybe/dome
+EOF
+}
+
+# --- Initialization Implementation ---
+initialize_dome() {
+    echo "Initializing dome dotfiles manager..."
+    
+    # Check dependencies
+    for dep in "${DEPS[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            echo "Error: Missing required dependency '$dep'"
+            exit 1
+        fi
+    done
+
+    # Create config directory
+    mkdir -p "${HOME}/.config/dome"
+    
+    # Create default config if not exists
+    if [ ! -f "$DOME_CONFIG" ]; then
+        cat > "$DOME_CONFIG" <<-EOF
+meta:
+  repo: "git@github.com:yourusername/dotfiles.git"
+  branch: "main"
+  local_path: "~/.dotfiles"
+  strategy: "rebase"
+
+profiles:
+  arch:
+    - "sudo pacman -S --noconfirm"
+    - "yay -S"
+    - "script"
+  debian:
+    - "sudo apt install -y"
+    - "sudo snap install"
+    - "brew install"
+    - "script"
+
+hooks:
+  pre_sync: ""
+  post_sync: ""
+EOF
+    fi
+
+    # Set up repository
+    local repo_path=$(yq e '.meta.local_path' "$DOME_CONFIG" | sed "s|~|$HOME|")
+    if [ ! -d "$repo_path" ]; then
+        git clone "$(yq e '.meta.repo' "$DOME_CONFIG")" "$repo_path"
+    fi
+
+    # Create essential files
+    mkdir -p "${repo_path}/scripts"
+    [ -f "${repo_path}/.domeignore" ] || cat > "${repo_path}/.domeignore" <<-EOF
+**/dome.yaml
+**/dome-lock.yaml
+**/.git
+**/scripts
+EOF
+
+    [ -f "${repo_path}/dome.yaml" ] || cat > "${repo_path}/dome.yaml" <<-EOF
+version: 1.0
+
+packages:
+  shared: []
+  arch: []
+  debian: []
+EOF
+
+    echo "Initialization complete!"
+    echo "Edit your configuration at: $DOME_CONFIG"
+}
+
+run_pkg_command() {
+  local action=$1
+  local manager=$2
+  local pkg=$3
+  local sudo_cmd=""
+  local install_cmd=""
+  
+  sudo_cmd=$(yaml_get ".profiles.$distro.$manager.sudo" "$DOME_CONFIG")
+  install_cmd=$(yaml_get ".profiles.$distro.$manager.$action" "$DOME_CONFIG")
+
+  if [ "$sudo_cmd" = "true" ]; then
+    sudo_cmd="sudo"
+  else
+    sudo_cmd=""
+  fi
+
+  case $manager in
+    "script")
+      eval "$sudo_cmd $install_cmd $pkg"
+      ;;
+    *)
+      eval "$sudo_cmd $manager $install_cmd $pkg"
+      ;;
+  esac
+}
+
+# --- Installation Core (install.sh) ---
+install_package() {
+    local pkg=$1
+    local shared=$2
+    local distro=$(detect_distro)
+    local installed=0
+
+    # Ensure lock file exists
+    if [ ! -f "$LOCKFILE" ]; then
+        touch "$LOCKFILE"
+        print_info "Lock file created at $LOCKFILE"
+    fi
+
+    print_info "Installing package: $pkg"
+
+    # Check if a script exists for the package
+    if run_script_install "$pkg"; then
+        generate_lock_entry "$pkg" "script"
+        print_success "Successfully installed $pkg"
+        return 0
+    fi
+
+    # Fallback to package managers
+    while read -r manager; do
+        print_info "Using package manager: $manager"
+        if run_pkg_command "install" "$manager" "$pkg"; then
+            generate_lock_entry "$pkg" "$manager"
+            installed=1
+            break
+        fi
+    done < <(yaml_get ".profiles.$distro | keys[]" "$DOME_CONFIG")
+
+    if [ $installed -eq 1 ]; then
+        print_success "Successfully installed $pkg"
+        return 0
+    else
+        print_error "Failed to install $pkg"
+        return 1
+    fi
+}
+
+# --- Enhanced Lockfile Management ---
+generate_lock_entry() {
+    local pkg="$1"
+    local source="$2"
+    local version
+    
+    case $source in
+        "apt")
+            version=$(dpkg -s "$pkg" | awk '/Version:/ {print $2}')
+            ;;
+        "pacman")
+            version=$(pacman -Qi "$pkg" | awk '/Version/ {print $3}')
+            ;;
+        "brew")
+            version=$(brew list --versions "$pkg" | awk '{print $2}')
+            ;;
+        "script")
+            version=$(yaml_get ".packages.$distro[] | select(.name == \"$pkg\").version" "$DOME_YAML")
+            ;;
+        *)
+            version="unknown"
+            ;;
+    esac
+
+    yaml_set ".packages.$pkg.source = \"$source\"" "$LOCKFILE"
+    yaml_set ".packages.$pkg.version = \"$version\"" "$LOCKFILE"
+}
+
+# --- Source-Aware Removal ---
+remove_package() {
+    local pkg=$1
+    local distro=$(detect_distro)
+    local source=$(yaml_get ".packages.$pkg.source" "$LOCKFILE")
+
+    print_info "Removing package: $pkg"
+
+    case $source in
+        "script")
+            if run_script_remove "$pkg"; then
+                yaml_set "del(.packages.$pkg)" "$LOCKFILE"
+                print_success "Successfully removed $pkg"
+                return 0
+            fi
+            ;;
+        *)
+            if run_pkg_command "remove" "$source" "$pkg"; then
+                yaml_set "del(.packages.$pkg)" "$LOCKFILE"
+                print_success "Successfully removed $pkg"
+                return 0
+            fi
+            ;;
+    esac
+
+    print_warning "Falling back to cascade removal"
+    # Fallback to original cascade method
+    while read -r manager; do
+        case $manager in
+            "script")
+                run_script_remove "$pkg" && removed=1
+                ;;
+            *)
+                run_pkg_command "remove" "$manager" "$pkg" && removed=1
+                ;;
+        esac
+        [ $removed -eq 1 ] && break
+    done < <(yaml_get ".profiles.$distro[]" "$DOME_CONFIG")
+
+    if [ $removed -eq 1 ]; then
+        yaml_set "del(.packages.$pkg)" "$LOCKFILE"
+        print_success "Successfully removed $pkg"
+        return 0
+    else
+        print_error "Failed to remove $pkg"
+        return 1
+    fi
+}
+
+# --- Update Command ---
+update_packages() {
+  local distro=$(detect_distro)
+  
+  # Update system packages
+  case $distro in
+    "debian") sudo apt update && sudo apt upgrade -y ;;
+    "arch") sudo pacman -Syu --noconfirm ;;
+    "macos") brew update && brew upgrade ;;
+  esac
+
+  # Update dome-managed packages
+  while read -r pkg; do
+    install_package "$pkg" false
+  done < <(yaml_get ".packages.shared[].name" "$DOME_YAML")
+}
+
+# --- Script Handling ---
+run_script_install() {
+    local script="${REPO_ROOT}/scripts/${1}.sh"
+    
+    if [ ! -x "$script" ]; then
+        print_warning "No install script found for $1"
+        return 1
+    fi
+
+    # Source script to access functions
+    source "$script"
+    
+    if declare -f "install" > /dev/null; then
+        DOME_DISTRO=$(detect_distro)
+        DOME_PKG_VERSION=$(yaml_get ".packages.$distro[] | select(.name == \"$1\").version" "$DOME_YAML")
+        install
+        return $?
+    else
+        print_error "Script missing install function: install"
+        return 1
+    fi
+}
+
+run_script_remove() {
+    local script="${REPO_ROOT}/scripts/${1}.sh"
+    
+    if [ ! -x "$script" ]; then
+        print_warning "No remove script found for $1"
+        return 1
+    fi
+
+    # Source script to access functions
+    source "$script"
+    
+    if declare -f "uninstall" > /dev/null; then
+        DOME_DISTRO=$(detect_distro)
+        uninstall
+        return $?
+    else
+        print_error "Script missing uninstall function: uninstall"
+        return 1
+    fi
+}
+
+# --- Sync Engine (sync.sh) ---
+perform_sync() {
+    print_info "Starting sync operation..."
+    
+    if rsync -av --filter="merge ${REPO_ROOT}/.domeignore" \
+        "${REPO_ROOT}/" "${HOME}/"; then
+        print_success "Repo → Home sync completed"
+    else
+        print_error "Failed to sync Repo → Home"
+    fi
+
+    if rsync -av --filter="merge ${REPO_ROOT}/.domeignore" \
+        "${HOME}/" "${REPO_ROOT}/"; then
+        print_success "Home → Repo sync completed"
+    else
+        print_error "Failed to sync Home → Repo"
+    fi
+}
+
+# --- CLI Parser ---
+main() {
+    case $1 in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -v|--version)
+            echo "dome $VERSION"
+            exit 0
+            ;;
+        --deps)
+            list_deps
+            exit 0
+            ;;
+        init)
+            initialize_dome
+            ;;
+        install|i)
+            local shared=false
+            [ "$2" = "-s" ] && shared=true && shift
+            install_package "$2" "$shared"
+            ;;
+        remove|rm)
+            remove_package "$2"
+            ;;
+        update|up)
+            update_packages
+            ;;
+        sync)
+            perform_sync
+            ;;
+        *)
+            echo "Invalid command: $1"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
