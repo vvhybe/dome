@@ -1,0 +1,5 @@
+# Ignore Git files and dome config
+.git/
+.domeignore
+README.md
+LICENSE
