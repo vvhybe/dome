@@ -54,10 +54,47 @@ get_repo_root() {
 # Detect current distro (uses /etc/os-release if available)
 detect_distro() {
   if [ -f /etc/os-release ]; then
-    (
-      . /etc/os-release
-      echo "$ID"
-    )
+    # Use env -u VERSION to avoid conflicts with our global VERSION
+    local id id_like
+    id=$(env -u VERSION HOME="$HOME" PATH="$PATH" bash -c '. /etc/os-release; echo "$ID"')
+    id_like=$(env -u VERSION HOME="$HOME" PATH="$PATH" bash -c '. /etc/os-release; echo "$ID_LIKE"')
+    # Normalize to lowercase.
+    id=$(echo "$id" | tr '[:upper:]' '[:lower:]')
+    id_like=$(echo "$id_like" | tr '[:upper:]' '[:lower:]')
+
+    # Prioritize known base families
+    if echo "$id_like" | grep -qi "debian"; then
+      echo "debian"
+      return
+    fi
+
+    if echo "$id" | grep -qiE "arch"; then
+      echo "arch"
+      return
+    fi
+
+    if echo "$id" | grep -qi "fedora" || echo "$id_like" | grep -qi "fedora"; then
+      echo "fedora"
+      return
+    fi
+
+    if echo "$id" | grep -qi "suse" || echo "$id_like" | grep -qi "suse"; then
+      echo "suse"
+      return
+    fi
+
+    # For Ubuntu, even though $ID is "ubuntu", we want to treat it as debian-based.
+    if [ "$id" = "ubuntu" ]; then
+      if echo "$id_like" | grep -qi "debian"; then
+        echo "debian"
+      else
+        echo "ubuntu"
+      fi
+      return
+    fi
+
+    # Fallback: just return the normalized $ID.
+    echo "$id"
   else
     echo ""
   fi
@@ -92,7 +129,7 @@ run_hook() {
   local hook_name="$1"
   local hook_cmd
   hook_cmd=$(yaml_get ".hooks.$hook_name" "$DOME_CONFIG")
-  # If hook_cmd is empty or equals "null", then do nothing.
+  # If hook_cmd is empty or equals "null", do nothing.
   if [[ -z "$hook_cmd" || "$hook_cmd" == "null" ]]; then
     return 0
   fi
