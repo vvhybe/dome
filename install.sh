@@ -34,6 +34,20 @@ print_error() { print_status "red" "cross" "$1"; }
 print_info() { print_status "blue" "arrow" "$1"; }
 print_warning() { print_status "yellow" "warn" "$1"; }
 
+# --- Spinner Function ---
+spinner() {
+  local pid=$1
+  local delay=0.1
+  local spinstr='|/-\'
+  while kill -0 "$pid" 2>/dev/null; do
+    for ((i = 0; i < ${#spinstr}; i++)); do
+      printf "\r%s %s" "${spinstr:$i:1}" "Downloading dome..."
+      sleep "$delay"
+    done
+  done
+  printf "\r"
+}
+
 # --- Installer Settings ---
 readonly DEST="$HOME/bin"
 readonly DESTFILE="$DEST/dome"
@@ -77,11 +91,22 @@ fi
 # --- Create Destination Directory ---
 mkdir -p "$DEST"
 
-# --- Download dome Script ---
+# --- Download dome Script with Custom TUI Loader ---
 if [[ "$SILENT" == "true" ]]; then
   curl -fsSL "https://raw.githubusercontent.com/vvhybe/dome/$TAG/dome" --output dome.tmp
+  curl_exit=$?
 else
-  curl -fL "https://raw.githubusercontent.com/vvhybe/dome/$TAG/dome" --output dome.tmp
+  # Launch curl in the background with silent progress.
+  curl -fL "https://raw.githubusercontent.com/vvhybe/dome/$TAG/dome" --silent --output dome.tmp &
+  curl_pid=$!
+  spinner "$curl_pid"
+  wait "$curl_pid"
+  curl_exit=$?
+fi
+
+if [ "$curl_exit" -ne 0 ]; then
+  print_error "Download failed. Please check your internet connection."
+  exit 1
 fi
 
 mv -f dome.tmp "$DESTFILE"
