@@ -35,7 +35,7 @@ print_info() { print_status "blue" "arrow" "$1"; }
 print_warning() { print_status "yellow" "warn" "$1"; }
 
 # --- Installer Settings ---
-readonly DEST="$HOME/bin"
+readonly DEST="$HOME/.local/bin"
 readonly DESTFILE="$DEST/dome"
 
 SILENT='false'
@@ -88,4 +88,4 @@ mv -f dome.tmp "$DESTFILE"
 chmod 755 "$DESTFILE"
 
 [[ "$SILENT" == "true" ]] || print_success "Installation finished."
-[[ "$SILENT" == "true" ]] || echo "Ensure that $DEST is in your PATH."
+[[ "$SILENT" == "true" ]] || print_warning "Ensure that $DEST is in your PATH."
