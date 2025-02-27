@@ -54,8 +54,10 @@ get_repo_root() {
 # Detect current distro (uses /etc/os-release if available)
 detect_distro() {
   if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    echo "$ID"
+    (
+      . /etc/os-release
+      echo "$ID"
+    )
   else
     echo ""
   fi
