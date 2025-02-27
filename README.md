@@ -1,3 +1,7 @@
+![DOME](dome.svg)
+
+---
+
 # dome
 
 **dome** is a minimalist dotfiles manager written in Bash that offers bidirectional syncing between your home directory and a Git-based dotfiles repository. It features Git integration, conflict detection/resolution, pre/post-sync hooks, and an innovative distro-aware file mapping mechanism.
