@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly VERSION="v1.0.0"
+readonly DOME_VERSION="v1.0.1"
 readonly DOME_CONFIG="${HOME}/.config/dome/config.yaml"
 
 # Dependencies
@@ -54,36 +54,28 @@ get_repo_root() {
 # Detect current distro (uses /etc/os-release if available)
 detect_distro() {
   if [ -f /etc/os-release ]; then
-    # Use env -u VERSION to avoid conflicts with our global VERSION
     local id id_like
-    id=$(env -u VERSION HOME="$HOME" PATH="$PATH" bash -c '. /etc/os-release; echo "$ID"')
-    id_like=$(env -u VERSION HOME="$HOME" PATH="$PATH" bash -c '. /etc/os-release; echo "$ID_LIKE"')
-    # Normalize to lowercase.
+    id=$(grep '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"')
+    id_like=$(grep '^ID_LIKE=' /etc/os-release | cut -d= -f2 | tr -d '"')
     id=$(echo "$id" | tr '[:upper:]' '[:lower:]')
     id_like=$(echo "$id_like" | tr '[:upper:]' '[:lower:]')
 
-    # Prioritize known base families
     if echo "$id_like" | grep -qi "debian"; then
       echo "debian"
       return
     fi
-
     if echo "$id" | grep -qiE "arch"; then
       echo "arch"
       return
     fi
-
     if echo "$id" | grep -qi "fedora" || echo "$id_like" | grep -qi "fedora"; then
       echo "fedora"
       return
     fi
-
     if echo "$id" | grep -qi "suse" || echo "$id_like" | grep -qi "suse"; then
       echo "suse"
       return
     fi
-
-    # For Ubuntu, even though $ID is "ubuntu", we want to treat it as debian-based.
     if [ "$id" = "ubuntu" ]; then
       if echo "$id_like" | grep -qi "debian"; then
         echo "debian"
@@ -92,8 +84,6 @@ detect_distro() {
       fi
       return
     fi
-
-    # Fallback: just return the normalized $ID.
     echo "$id"
   else
     echo ""
@@ -209,8 +199,15 @@ perform_sync() {
   # copy that file into the fallback location in the temporary view.
   local distro
   distro=$(detect_distro)
-  # Get keys from the distro_files mapping.
-  mapfile -t mapping_keys < <(yaml_get '.distro_files | keys | .[]' "$DOME_CONFIG")
+
+  # Get keys from the distro_files mapping, if it exists.
+  local mapping_keys=()
+  local distro_files
+  distro_files=$(yaml_get '.distro_files' "$DOME_CONFIG")
+  if [[ "$distro_files" != "null" && -n "$distro_files" ]]; then
+    mapfile -t mapping_keys < <(yaml_get '.distro_files | keys | .[]' "$DOME_CONFIG")
+  fi
+
   for dest in "${mapping_keys[@]}"; do
     local mapped
     mapped=$(yaml_get ".distro_files[\"$dest\"].$distro" "$DOME_CONFIG")
@@ -350,7 +347,7 @@ list_deps() {
   fi
 
   for dep in "${DEPS[@]}"; do
-    print_notice "$dep"
+    print_notice " - $dep"
   done
   return 0
 }
@@ -367,7 +364,7 @@ main() {
   pull) dome_pull ;;
   push) dome_push ;;
   resolve) resolve_conflicts ;;
-  -v | --version) echo "dome $VERSION" ;;
+  -v | --version) echo "dome $DOME_VERSION" ;;
   --deps) list_deps ;;
   -h | --help) usage ;;
   *)
