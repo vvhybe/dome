@@ -4,7 +4,7 @@
 
 # dome
 
-**dome** is a minimalist dotfiles manager written in Bash that offers bidirectional syncing between your home directory and a Git-based dotfiles repository. It features Git integration, conflict detection/resolution, pre/post-sync hooks, and an innovative distro-aware file mapping mechanism.
+**dome** is a minimalist dotfiles manager written in Bash that offers bidirectional syncing between your home directory and a Git-based dotfiles repository. It features Git integration, conflict detection/resolution (via custom hooks), pre/post-sync hooks, and an innovative distro-aware file mapping mechanism.
 
 ## Table of Contents
 
@@ -28,41 +28,52 @@
 
 - **Bidirectional Syncing:** Keep your home and repository in perfect sync.
 - **Git Integration:** Pull updates and push changes to your remote repository seamlessly.
-- **Conflict Detection & Resolution:** Automatically detect conflicts and resolve them with your preferred merge tool.
+- **Conflict Detection & Resolution:** Automatically detect conflicts and resolve them with your preferred merge tool via hooks.
 - **Distro-Aware File Mapping:** Define distro-specific variants of your dotfiles using a simple YAML mapping.
 - **Hooks:** Run custom commands before or after sync operations to automate tasks.
-- **Minimalist Design:** Focus on simplicity and reliability.
+- **Force Home-based Repository:** The local dotfiles repository is always located under `$HOME`, regardless of the current working directory.
+- **Backup Management:** Automatically create backups (organized by distro) during syncing—unless explicitly disabled.
 
 ## Requirements
 
 - **Bash:** The script is written in Bash and intended for Unix-like systems.
-- **rsync:** Used for file synchronization.
 - **git:** For managing your dotfiles repository.
 - **yq:** For parsing YAML configuration files.
 - **Merge Tool (Optional):** For conflict resolution (e.g., `meld`).
 
+> [!NOTE]
+> Although earlier versions referenced `rsync`, **dome** no longer depends on it.
+
 ## Installation
 
-> [!NOTE]  
-> Make sure that `~/bin/` is in your **$PATH**
+> [!NOTE]
+> Ensure that `~/bin/` is in your **$PATH**
 
 Run:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vvhybe/dome/main/install.sh | bash
 ```
-> [!TIP]
-> to install the latest version of `dome`, or install a specific [release](https://github.com/vvhybe/dome/releases) with its tag, e.g. `v1.0.0`:
 
-**USE**:
+> [!TIP]
+> To install the latest version of `dome`, or install a specific release (e.g. `v1.0.0`):
+
+USE:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/vvhybe/dome/main/install.sh | bash -s -- --tag=v0.2.0
 ```
+
 > [!TIP]
-> You can suppress the installation output with the flag `--silent` or `-s`:
+> You can suppress installation output with the flag `--silent` or `-s`.
 
-## Initialize dome:
+## Initialize dome
 
-Run the initialization command to set up the configuration and clone your dotfiles repository:
+Run the initialization command to set up the configuration and clone your `dotfiles` repository.
+**Important**: When using a custom path (via `-p`), the repository will be forced to reside under `$HOME`. For example, running:
+
+```bash
+dome init -p my-dotfiles
+```
+will clone your repository into `$HOME/my-dotfiles`. If the specified folder already exists (and isn’t empty), dome will fall back to using the existing directory.
 
 ```bash
 dome init
@@ -71,14 +82,13 @@ dome init
 ## Configuration
 
 The main configuration file is located at [`~/.config/dome/config.yaml`](config.yaml). This file contains settings for:
-
-### Repository Settings
+Repository Settings
 
 - **repo**: URL of your dotfiles Git repository.
-- **branch**: The branch to use (e.g., `main`).
-- **local_path**: The local path where your repository will be cloned (e.g., `~/.dotfiles`).
+- **branch**: The branch to use (e.g., main).
+- **local_path**: The local path where your repository will be cloned. Note: This path is always forced to be under $HOME.
 
-### Distro Files Mapping
+Distro Files Mapping
 
 Define mappings to handle distro-specific configurations. For example:
 
@@ -87,110 +97,127 @@ distro_files:
   .bashrc:
     arch: ".bashrc.arch"
     debian: ".bashrc.debian"
+
 ```
 
-In this example, if you're running an Arch-based system, `dome` will use `.bashrc.arch` from your repository to update `~/.bashrc`.
+In this example, if you're running an Arch-based system, dome will use `.bashrc.arch` from your repository to update `~/.bashrc.`
 
-### Hooks
+## Hooks
 
-Customize actions before and after syncing, pushing, pulling:
+Customize actions before and after syncing, pushing, and pulling:
 
 ```yaml
 hooks:
   conflict_resolver: "meld"
   pre_sync: "echo 'Starting sync...'"
-  post_sync: "echo 'Sync complete.'"
-  pre_pull: "echo 'pulling using git'"
-  post_pull: "echo 'pulled changes'"
-  pre_push: "echo 'befor push'"
-  post_push: "echo 'after push'"
+  post_sync: "notify-send 'Dotfiles synced!'"
+  pre_pull: "echo 'Pulling updates...'"
+  post_pull: "echo 'Updates pulled.'"
+  pre_push: "echo 'Preparing to push...'"
+  post_push: "echo 'Push complete.'"
 ```
 
 ## Usage
 
-Run `dome` with the following commands:
+Run dome with the following commands:
 
 - Initialize:
-```bash
-dome init
-```
-Sets up the configuration and clones the repository.
-
+  ```bash
+  dome init
+  ```
+  
+  Sets up the configuration and clones the repository into a home-based folder.
+  
 - Bidirectional Sync:
-```bash
-dome sync
-```
-Syncs dotfiles between your repository and home directory while applying distro-aware mappings.
+  
+  ```bash
+  dome sync
+  ```
+
+  Syncs dotfiles between your repository and your home directory while applying distro-aware mappings.
+  
+    - Use `-s` for snapshot mode (files are copied instead of symlinked).
+    - Use `-n` to disable backup creation.
+    - Use `-v` for verbose output (detailed table output will list synced and backed up files).
 
 - Pull Updates:
-```bash
-dome pull
-```
-Pull the latest changes from the remote repository.
+
+  ```bash
+  dome pull
+  ```
+  
+  Pulls the latest changes from the remote repository.
 
 - Push Changes:
-```bash
-dome push
-```
-Push your local changes to the remote repository.
 
-> [!NOTE]  
-> To push your changes you should commit them using default `git`. Then push them via `dome` so you take advantage to push `pre/post` hooks
+  ```bash
+  dome push
+  ```
+  
+  Pushes your local changes to the remote repository.
+  
+> [!NOTE]
+> To push your changes, first commit them using Git. Then use dome push so that pre/post hooks are executed.
 
-- Resolve Conflicts:
-```bash
-dome resolve
-```
-Launch your configured merge tool to resolve any sync conflicts.
+- Revert Backups:
+
+  ```bash
+  dome revert
+  ```
+  
+  Restores dotfiles from the latest backup in your distro’s backup directory (located at `~/.config/dome/backups/<distro>/`). You may also specify a backup directory explicitly.
 
 - Help & Version:
-```bash
-dome -h   # Show help message
-dome -v   # Show version information
-```
+
+  ```bash
+  dome -h   # Show help message
+  dome -v   # Show version information
+  ```
 
 ## Syncing Mechanism
 
-`dome` maintains a true two-way mirror of your tracked `dotfiles`:
+dome maintains a true two-way mirror of your tracked dotfiles:
 
-1. Repo → Home Sync:
-A temporary “merged” view of your repository is created. Here, distro-specific files (as defined in the `distro_files` mapping) are copied to their fallback names before syncing. This merged view is then used to update your home directory.
-2. Home → Repo Sync:
-Only files that are already tracked in the repository are updated. If a file is part of a distro mapping, changes to the fallback file in your home directory are used to update the corresponding distro-specific file in the repository.
+  1. **Repo → Home Sync**: 
+  A “merged” view is created where distro-specific files (as defined in the `distro_files` mapping) are mapped to their common names before syncing to your home directory. If a file already exists at the destination, it is backed up (unless disabled) into a distro-organized backup folder (`$HOME/.config/dome/backups/<distro>/bak_<timestamp>_<RANDOM>`).
 
-This ensures that only the dotfiles you want tracked are synchronized, protecting other home directory files (e.g., those in `.ssh` or `.cache`) from accidental inclusion.
+  2. **Home → Repo Sync**:
+  Only files that are already tracked in the repository are updated. Changes to files in your home directory are synced back into their corresponding distro-specific files in the repository.
+
+This mechanism ensures that only the dotfiles you want tracked are synchronized, keeping unrelated files safe.
 
 ## Hooks and Customizations
 
 Customize your workflow using hooks:
 
-- **Conflict Resolver**: Specify your preferred merge tool (e.g., `meld`) for resolving conflicts.
-- **Pre-sync Hook**: Runs before the syncing process begins.
-- **Post-sync Hook**: Runs after syncing completes.
-- **Pre-pull Hook**: Runs before the changes pulling from the repo main stream.
-- **Post-pull Hook**: Runs right after the changes pulled from the repo branch.
-- **Pre-push Hook**: Runs before the changes get pushed to the repo main stream **should be commited first**.
-- **Post-push Hook**: Runs after the changes pushed to the repo.
+  - **Conflict Resolver**: Specify your preferred merge tool (e.g., meld) for resolving conflicts.
+  - **Pre-sync Hook**: Runs before the syncing process begins.
+  - **Post-sync Hook**: Runs after syncing completes.
+  - **Pre-pull Hook**: Runs before pulling changes from the remote.
+  - **Post-pull Hook**: Runs immediately after changes are pulled.
+  - **Pre-push Hook**: Runs before pushing changes (ensure changes are committed first).
+  - **Post-push Hook**: Runs after pushing changes.
 
-These hooks are defined in the YAML configuration and are executed automatically during the sync, git processes.
+These hooks are defined in the YAML configuration and executed automatically during their respective operations.
 
 ## Troubleshooting
 
-- **Permission Issues**:
-If you encounter permission errors during syncing, ensure that you have the appropriate read/write permissions. Avoid running `dome` with `sudo`.
-- **Dependency Issues**:
-Make sure `rsync`, `git`, and `yq` are installed and available in your `PATH`.
-- **Conflict Resolution**:
-If conflicts are detected, run `dome resolve` to launch your merge tool and address discrepancies
+  - Repository Location:
+    If you specify a custom path using `-p`, remember that the repository will be cloned under `$HOME` (e.g., `$HOME/my-dotfiles`). If the folder exists and is not empty, dome will fall back to that directory.
+
+  - Backup Issues:
+    When running `dome sync` with verbose output (`-v`), the tool displays the backup actions in a table. If no backups are created (for example, when using the `-n` flag), the backup column will remain empty.
+
+  - Permission Issues:
+    If you encounter permission errors during syncing, ensure that you have the appropriate read/write permissions and avoid running dome with sudo.
+
+  - Dependency Issues:
+    Verify that `git` and `yq` are installed and available in your `$PATH`.
 
 ## Contributing
 
-Contributions to `dome` are welcome! Please fork the repository, create pull requests, and open issues if you have suggestions or encounter bugs. Follow the repository's contribution guidelines.
+Contributions to dome are welcome! Please fork the repository, create pull requests, and open issues if you have suggestions or encounter bugs. Follow the repository's contribution guidelines.
 
 ## License
 
-`dome` is distributed under the [GPL-3.0 License](LICENSE).
-
----
-
-*Happy syncing! 🎉*
+dome is distributed under the [GPL-3.0 License](LICENSE).
