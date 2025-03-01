@@ -25,7 +25,7 @@ detect_distro() {
 }
 
 # --- Constants ---
-readonly DOME_VERSION="v2.1.1"
+readonly DOME_VERSION="v2.0.0"
 readonly DOME_CONFIG="${HOME}/.config/dome/config.yaml"
 # Base backup directory for all backups organized by distro.
 readonly BACKUP_BASE_DIR="${HOME}/.config/dome/backups"
