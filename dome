@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly DOME_VERSION="v2.0.0"
+detect_distro() {
+  grep -qEi "arch" /etc/os-release 2>/dev/null && echo "arch" && return
+  grep -qEi "debian|ubuntu" /etc/os-release 2>/dev/null && echo "debian" && return
+  grep -qEi "fedora" /etc/os-release 2>/dev/null && echo "fedora" && return
+  echo "generic"
+}
+
+readonly DOME_VERSION="v2.1.1"
 readonly DOME_CONFIG="${HOME}/.config/dome/config.yaml"
+readonly BACKUP_DIR="${HOME}/.config/dome/bak_$(date +%s)_$(detect_distro)"
 
 # Dependencies
 readonly DEPS=("git" "yq")
@@ -61,7 +69,7 @@ resolve_path() {
 }
 
 yaml_get() {
-  yq "$1" "$2" 2>/dev/null | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/" | xargs
+  yq e "$1" "$2"
 }
 
 yaml_set() {
@@ -70,13 +78,6 @@ yaml_set() {
 
 get_repo_root() {
   resolve_path "$(yaml_get '.meta.local_path' "$DOME_CONFIG")"
-}
-
-detect_distro() {
-  grep -qEi "arch" /etc/os-release 2>/dev/null && echo "arch" && return
-  grep -qEi "debian|ubuntu" /etc/os-release 2>/dev/null && echo "debian" && return
-  grep -qEi "fedora" /etc/os-release 2>/dev/null && echo "fedora" && return
-  echo "generic"
 }
 
 run_hook() {
@@ -99,35 +100,22 @@ initialize_dome() {
 
   local default_repo="https://github.com/<yourusername>/dotfiles"
   local default_local_path="${HOME}/.dotfiles"
+  local repo="$(yaml_get '.meta.repo' "$DOME_CONFIG")"
+  local final_path="$(yaml_get '.meta.local_path' "$DOME_CONFIG")"
+  
+  repo="${custom_repo:-${repo:-$default_repo}}"
+  final_path="${custom_path:-${final_path:-$default_local_path}}"
+
   print_info "Initializing dotfile manager..."
   mkdir -p "${HOME}/.config/dome"
 
   if [[ -f "$DOME_CONFIG" ]]; then
     print_info "Config file already exists: $DOME_CONFIG"
     
-    if [[ -n "$custom_repo" ]]; then
-      yaml_set '.meta.repo = "'"$custom_repo"'"' "$DOME_CONFIG" 
-      print_success "Updated repo URL in config file."
-    fi
-
-    if [[ -n "$custom_path" ]]; then
-      yaml_set '.meta.local_path = "'"$custom_path"'"' "$DOME_CONFIG"
-      print_success "Updated local path in config file."
-      mkdir -p "$custom_path" && print_success "Created custom path: $custom_path"
-      
-      if [[ ! -d "$custom_path/.git" ]]; then
-        print_info "Cloning repository from $custom_repo into $custom_path"
-        git clone "$custom_repo" "$custom_path" --branch "$(yaml_get '.meta.branch' "$DOME_CONFIG")" && print_success "Repository cloned successfully." || { print_error "Failed to clone repository from $custom_repo"; return 1; }
-      else
-        print_info "Repository already exists at $custom_path"
-      fi
-    fi
-
-    print_notice "Edit $DOME_CONFIG as needed and run 'dome sync'"
-    return 0
-  fi
-
-  cat >"$DOME_CONFIG" <<EOF
+    [[ -n "$custom_repo" ]] && yaml_set '.meta.repo = "'"$custom_repo"'"' "$DOME_CONFIG" && print_success "Updated repo URL in config file."
+    [[ -n "$custom_path" ]] && yaml_set '.meta.local_path = "'"$custom_path"'"' "$DOME_CONFIG" && print_success "Updated local path in config file." && mkdir -p "$custom_path" && print_success "Created custom path: $custom_path"
+  else 
+    cat >"$DOME_CONFIG" <<EOF
 meta:
   repo: "${custom_repo:-$default_repo}"
   branch: "main"
@@ -145,27 +133,27 @@ distro_files:
     arch: ".bash_aliases.arch"
     debian: ".bash_aliases.debian"
 EOF
-  print_success "Config file created: $DOME_CONFIG"
-
-  local repo_dir=$(resolve_path "$(yaml_get '.meta.local_path' "$DOME_CONFIG")")
-  mkdir -p "$repo_dir" && print_info "Created directory: $repo_dir"
-  local repo_url=$(yaml_get '.meta.repo' "$DOME_CONFIG")
-
-  if [[ -z "$repo_url" || "$repo_url" == "$default_repo" ]]; then
-    print_info "Using demo repository. Initializing local git repo at $repo_dir"
-    [[ ! -d "$repo_dir/.git" ]] && (cd "$repo_dir" && git init) && print_success "Local git repository initialized at $repo_dir"
-  else
-    if [[ ! -d "$repo_dir/.git" ]]; then
-      print_info "Cloning repository from $repo_url into $repo_dir"
-      git clone "$repo_url" "$repo_dir" --branch "$(yaml_get '.meta.branch' "$DOME_CONFIG")" && print_success "Repository cloned successfully." || { print_error "Failed to clone repository from $repo_url"; return 1; }
-    else
-      print_info "Repository already exists at $repo_dir"
-    fi
+    print_success "Config file created: $DOME_CONFIG"
   fi
 
-  local ignore_file="${repo_dir}/.domeignore"
-  if [[ ! -f "$ignore_file" ]]; then
-    cat >"$ignore_file" <<EOF
+  if [[ "$repo" == "$default_repo" ]]; then
+    print_error "The repository URL is set to the default/demo URL. Please update it in the config file: $DOME_CONFIG"
+    return 1
+  fi
+
+  if [[ ! -d "$final_path/.git" ]]; then
+    if [[ -n "$(ls -A "$final_path" 2>/dev/null)" ]]; then
+      print_error "Directory $final_path already exists and is not empty."
+      return 1
+    fi
+    print_info "Cloning repository from ${repo} into $final_path"
+    git clone "${repo}" "$final_path" --branch "$(yaml_get '.meta.branch' "$DOME_CONFIG")" && print_success "Repository cloned successfully." || { print_error "Failed to clone repository from ${repo}"; return 1; }
+  else
+    print_info "Repository already exists at $final_path"
+    local ignore_file="${final_path}/.domeignore"
+    if [[ ! -f "$ignore_file" ]]; then
+      mkdir -p "$(dirname "$ignore_file")"
+      cat >"$ignore_file" <<EOF
 # Default dome ignore patterns
 .git/
 .github/
@@ -173,7 +161,8 @@ EOF
 README.md
 LICENSE
 EOF
-    print_success "Created default .domeignore at: $ignore_file"
+      print_success "Created default .domeignore at: $ignore_file"
+    fi
   fi
 
   print_success "Initialization complete!"
@@ -184,10 +173,30 @@ is_ignored() {
   local file="$1" repo_root="$2" ignore_file="${repo_root}/.domeignore"
   [[ -f "$ignore_file" ]] || return 1
   [[ "$file" == ".git" || "$file" == ".git/"* || "$file" == ".domeignore" ]] && return 0
+
   while IFS= read -r pattern; do
     [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+
+    # Handle negation patterns
+    local negate=0
+    if [[ "$pattern" == !* ]]; then
+      negate=1
+      pattern="${pattern:1}"
+    fi
+
+    # Remove trailing slash for directory patterns
     pattern="${pattern%/}"
-    [[ "$file" == "$pattern" || "$file" == "$pattern"/* ]] && return 0
+
+    # Convert pattern to a regex
+    pattern=$(echo "$pattern" | sed 's/[.[\*^$(){}?+|]/\\&/g; s/\*/.*/g; s/\?/./g; s/^/\\^/; s/$/\\$/')
+
+    if [[ "$file" =~ $pattern ]]; then
+      if [[ $negate -eq 1 ]]; then
+        return 1
+      else
+        return 0
+      fi
+    fi
   done <"$ignore_file"
   return 1
 }
@@ -223,7 +232,8 @@ link_or_copy_file() {
       [[ "$(readlink "$target")" == "$source" && "$snapshot" != "true" ]] && symlinked="Yes" && [[ "$verbose" == "true" ]] && print_table_row "${target#$HOME/}" "$symlinked" "$backuped" && return 0
     fi
     if [[ "$no_backup" != "true" ]]; then
-      local backup="${target}.bak.$(date +%s)"
+      local backup="${BACKUP_DIR}/${target#$HOME/}"
+      mkdir -p "$(dirname "$backup")"
       [[ "$verbose" != "true" ]] && print_warning "Backing up existing file: ${target} → ${backup}"
       mv "$target" "$backup"
       backuped="$(basename "$backup")"
@@ -253,25 +263,17 @@ sync_files() {
 
   while IFS= read -r key; do
     local src=$(yaml_get ".distro_files[\"$key\"].$distro" "$DOME_CONFIG")
-    [[ -z "$src" ]] && continue
-    distro_map["$key"]="$src"
-    used_sources["$src"]=1
-    [[ "$verbose" != "true" ]] && print_notice "Using distro variant: ${key} → ${src}"
+    if [[ -n "$src" ]]; then
+      distro_map["$key"]="$src"
+      used_sources["$src"]=1
+      [[ "$verbose" != "true" ]] && print_notice "Using distro variant: ${key} → ${src}"
+    fi
   done < <(yaml_get '.distro_files | keys | .[]' "$DOME_CONFIG")
 
   for key in "${!distro_map[@]}"; do
     local src="${repo_root}/${distro_map[$key]}" target="${HOME}/${key}"
     [[ -f "$src" ]] && link_or_copy_file "$src" "$target" "$snapshot" "$no_backup" "$verbose"
   done
-
-  [[ "$verbose" != "true" ]] && print_info "Syncing common dotfiles..."
-  while IFS= read -r -d $'\0' file; do
-    local rel_file="${file#${repo_root}/}"
-    [[ "${used_sources[$rel_file]:-}" == "1" ]] && continue
-    is_ignored "$rel_file" "$repo_root" && continue
-    local target="${HOME}/${rel_file}"
-    [[ -f "$file" ]] && link_or_copy_file "$file" "$target" "$snapshot" "$no_backup" "$verbose"
-  done < <(find "$repo_root" -type f -print0)
 
   [[ "$verbose" == "true" ]] && echo
 }
@@ -293,6 +295,25 @@ perform_sync() {
   sync_files "$snapshot" "$no_backup" "$verbose"
   run_hook "post_sync"
   print_success "Sync completed successfully!"
+}
+
+revert_backup() {
+  print_info "Reverting to backed up dotfiles..."
+  local backup_dir="${1:-}"
+  [[ -z "$backup_dir" ]] && print_error "No backup directory specified." && return 1
+
+  if [[ ! -d "$backup_dir" ]]; then
+    print_error "Backup directory does not exist: $backup_dir"
+    return 1
+  fi
+
+  while IFS= read -r -d $'\0' backup_file; do
+    local original_file="${HOME}/${backup_file#${backup_dir}/}"
+    mv "$backup_file" "$original_file"
+    print_success "Restored $original_file from $backup_file"
+  done < <(find "$backup_dir" -type f -print0)
+
+  print_success "Reversion to backups completed!"
 }
 
 dome_pull() {
@@ -321,6 +342,7 @@ Commands:
   sync [options]     Sync dotfiles
   pull               Update from remote
   push               Publish changes
+  revert [dir]       Revert to backed up dotfiles from specified directory
   -h                 Show help
   -v                 Show version
 Init Options:
@@ -340,6 +362,7 @@ main() {
     sync) perform_sync "$@" ;;
     pull) dome_pull ;;
     push) dome_push ;;
+    revert) revert_backup "$@" ;;
     -v) echo -e "${COLORS[bold]}dome ${DOME_VERSION}${COLORS[reset]}" ;;
     -h|*) usage ;;
   esac
