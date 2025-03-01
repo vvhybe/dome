@@ -63,7 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/vvhybe/dome/main/install.sh | bash 
 ```
 
 > [!TIP]
-> You can suppress installation output with the flag --silent or -s.
+> You can suppress installation output with the flag `--silent` or `-s`.
 
 ## Initialize dome
 
@@ -84,9 +84,9 @@ dome init
 The main configuration file is located at [`~/.config/dome/config.yaml`](config.yaml). This file contains settings for:
 Repository Settings
 
-- repo: URL of your dotfiles Git repository.
-- branch: The branch to use (e.g., main).
-- local_path: The local path where your repository will be cloned. Note: This path is always forced to be under $HOME.
+- **repo**: URL of your dotfiles Git repository.
+- **branch**: The branch to use (e.g., main).
+- **local_path**: The local path where your repository will be cloned. Note: This path is always forced to be under $HOME.
 
 Distro Files Mapping
 
@@ -122,67 +122,66 @@ hooks:
 Run dome with the following commands:
 
 - Initialize:
-
-```bash
-dome init
-```
-
-Sets up the configuration and clones the repository into a home-based folder.
-
+  ```bash
+  dome init
+  ```
+  
+  Sets up the configuration and clones the repository into a home-based folder.
+  
 - Bidirectional Sync:
+  
+  ```bash
+  dome sync
+  ```
 
-```bash
-dome sync
-```
-
-Syncs dotfiles between your repository and your home directory while applying distro-aware mappings.
-
-  - Use `-s` for snapshot mode (files are copied instead of symlinked).
-  - Use `-n` to disable backup creation.
-  - Use `-v` for verbose output (detailed table output will list synced and backed up files).
+  Syncs dotfiles between your repository and your home directory while applying distro-aware mappings.
+  
+    - Use `-s` for snapshot mode (files are copied instead of symlinked).
+    - Use `-n` to disable backup creation.
+    - Use `-v` for verbose output (detailed table output will list synced and backed up files).
 
 - Pull Updates:
 
-```bash
-dome pull
-```
-
-Pulls the latest changes from the remote repository.
+  ```bash
+  dome pull
+  ```
+  
+  Pulls the latest changes from the remote repository.
 
 - Push Changes:
 
-```bash
-dome push
-```
-
-Pushes your local changes to the remote repository.
-
+  ```bash
+  dome push
+  ```
+  
+  Pushes your local changes to the remote repository.
+  
 > [!NOTE]
 > To push your changes, first commit them using Git. Then use dome push so that pre/post hooks are executed.
 
 - Revert Backups:
 
-```bash
-dome revert
-```
-
-Restores dotfiles from the latest backup in your distro’s backup directory (located at `~/.config/dome/backups/<distro>/`). You may also specify a backup directory explicitly.
+  ```bash
+  dome revert
+  ```
+  
+  Restores dotfiles from the latest backup in your distro’s backup directory (located at `~/.config/dome/backups/<distro>/`). You may also specify a backup directory explicitly.
 
 - Help & Version:
 
-```bash
-dome -h   # Show help message
-dome -v   # Show version information
-```
+  ```bash
+  dome -h   # Show help message
+  dome -v   # Show version information
+  ```
 
 ## Syncing Mechanism
 
 dome maintains a true two-way mirror of your tracked dotfiles:
 
-  1. Repo → Home Sync: 
+  1. **Repo → Home Sync**: 
   A “merged” view is created where distro-specific files (as defined in the `distro_files` mapping) are mapped to their common names before syncing to your home directory. If a file already exists at the destination, it is backed up (unless disabled) into a distro-organized backup folder (`$HOME/.config/dome/backups/<distro>/bak_<timestamp>_<RANDOM>`).
 
-  2. Home → Repo Sync:
+  2. **Home → Repo Sync**:
   Only files that are already tracked in the repository are updated. Changes to files in your home directory are synced back into their corresponding distro-specific files in the repository.
 
 This mechanism ensures that only the dotfiles you want tracked are synchronized, keeping unrelated files safe.
