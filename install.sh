@@ -53,7 +53,7 @@ readonly DEST="$HOME/bin"
 readonly DESTFILE="$DEST/dome"
 
 SILENT='false'
-TAG='main'
+TAG='star-dust'
 
 # --- Process Command-Line Arguments ---
 while [[ $# -gt 0 ]]; do
