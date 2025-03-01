@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Global error trap for graceful failure.
+trap 'print_error "An unexpected error occurred. Exiting."' ERR
+
+# --- Dependency Check ---
+readonly DEPS=("git" "yq")
+check_dependencies() {
+  for cmd in "${DEPS[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo -e "\033[31m✗ Dependency '$cmd' is not installed. Aborting.\033[0m" >&2
+      exit 1
+    fi
+  done
+}
+check_dependencies
+
+# --- Distro Detection ---
 detect_distro() {
   grep -qEi "arch" /etc/os-release 2>/dev/null && echo "arch" && return
   grep -qEi "debian|ubuntu" /etc/os-release 2>/dev/null && echo "debian" && return
@@ -8,14 +24,13 @@ detect_distro() {
   echo "generic"
 }
 
+# --- Constants ---
 readonly DOME_VERSION="v2.1.1"
 readonly DOME_CONFIG="${HOME}/.config/dome/config.yaml"
-readonly BACKUP_DIR="${HOME}/.config/dome/bak_$(date +%s)_$(detect_distro)"
+# Base backup directory for all backups organized by distro.
+readonly BACKUP_BASE_DIR="${HOME}/.config/dome/backups"
 
-# Dependencies
-readonly DEPS=("git" "yq")
-
-# UI Components
+# --- UI Components ---
 declare -A COLORS=(
   [reset]="\033[0m" [bold]="\033[1m" [dim]="\033[2m"
   [red]="\033[31m" [green]="\033[32m" [yellow]="\033[33m"
@@ -31,8 +46,13 @@ declare -A SYMBOLS=(
 # --- UI Helpers ---
 print_status() {
   local color="$1" symbol="$2" msg="$3"
-  [[ -t 1 ]] && echo -e "${COLORS[bold]}${COLORS[$color]}${SYMBOLS[$symbol]} ${msg}${COLORS[reset]}" || echo "${SYMBOLS[$symbol]} ${msg}"
+  if [[ -t 1 ]]; then
+    echo -e "${COLORS[bold]}${COLORS[$color]}${SYMBOLS[$symbol]} ${msg}${COLORS[reset]}"
+  else
+    echo "${SYMBOLS[$symbol]} ${msg}"
+  fi
 }
+
 print_success() { print_status "green" "check" "$1"; }
 print_error() { print_status "red" "cross" "$1"; }
 print_info() { print_status "blue" "arrow" "$1"; }
@@ -41,18 +61,26 @@ print_notice() { print_status "magenta" "info" "$1"; }
 print_link() { print_status "cyan" "link" "$1"; }
 print_copy() { print_status "green" "copy" "$1"; }
 
-# Function to truncate paths for display in the table
+# Truncate long paths for display.
 truncate_path() {
-  local path="$1" max_length="$2"
-  if [[ ${#path} -gt $max_length ]]; then
-    local filename=$(basename "$path")
+  local path="$1"
+  local max_length="$2"
+  if ((${#path} > max_length)); then
+    local filename
+    filename=$(basename "$path")
     local dir_max=$((max_length - ${#filename} - 4))
-    [[ $dir_max -lt 3 ]] && echo "...${path: -max_length + 3}" || echo ".../${path: -dir_max}/$filename"
+    if ((dir_max < 3)); then
+      local trunc_length=$((max_length - 3))
+      echo "..."${path: -trunc_length}
+    else
+      echo ".../${path: -dir_max}/$filename"
+    fi
   else
     echo "$path"
   fi
 }
 
+# Spinner for visual feedback during long operations.
 spinner() {
   local pid=$1 msg=$2 delay=0.15 spinstr='|/-\'
   while kill -0 $pid 2>/dev/null; do
@@ -64,15 +92,37 @@ spinner() {
 }
 
 # --- Core Functions ---
+
+# Updated resolve_path:
+# - If path starts with "/" use it as-is.
+# - If it starts with "~" expand it.
+# - Otherwise, force it under $HOME.
 resolve_path() {
-  [[ "$1" == /* ]] && echo "$1" || echo "$HOME/$1"
+  local path="$1"
+  if [[ "$path" == /* ]]; then
+    echo "$path"
+  elif [[ "$path" == "~"* ]]; then
+    echo "${path/#\~/$HOME}"
+  else
+    echo "$HOME/$path"
+  fi
 }
 
+# YAML getter with file existence check.
 yaml_get() {
-  yq e "$1" "$2"
+  if [[ ! -f "$2" ]]; then
+    print_error "YAML file not found: $2"
+    exit 1
+  fi
+  yq -e "$1" "$2" | sed -e 's/^"\(.*\)"$/\1/' | xargs
 }
 
+# YAML setter with file existence check.
 yaml_set() {
+  if [[ ! -f "$2" ]]; then
+    print_error "YAML file not found: $2"
+    exit 1
+  fi
   yq -i "$1" "$2"
 }
 
@@ -80,41 +130,62 @@ get_repo_root() {
   resolve_path "$(yaml_get '.meta.local_path' "$DOME_CONFIG")"
 }
 
+# Run hook commands in a subshell.
 run_hook() {
   local hook_name="$1"
-  local hook_cmd=$(yaml_get ".hooks.$hook_name" "$DOME_CONFIG")
+  local hook_cmd
+  hook_cmd=$(yaml_get ".hooks.$hook_name" "$DOME_CONFIG")
   [[ -n "$hook_cmd" && "$hook_cmd" != "null" ]] || return 0
   print_notice "Running $hook_name hook..."
-  eval "$hook_cmd" || return 1
+  (eval "$hook_cmd") || {
+    print_error "Hook '$hook_name' failed."
+    return 1
+  }
 }
 
+# Initialize dome configuration.
+# If a custom path is provided via -p, the repository is forced to reside under $HOME.
 initialize_dome() {
   local custom_repo="" custom_path=""
-  [[ $# -gt 0 && "$1" =~ ^(https?:\/\/|git@) ]] && custom_repo="$1" && shift
-  while [[ "$#" -gt 0 ]]; do
-    case "$1" in
-      -p|--path) custom_path="$2"; shift 2 ;;
-      *) shift ;;
+  if [[ $# -gt 0 && "$1" =~ ^(https?:\/\/|git@) ]]; then
+    custom_repo="$1"
+    shift
+  fi
+  while getopts "p:" opt; do
+    case "$opt" in
+    p) custom_path="$OPTARG" ;;
+    *) ;;
     esac
   done
+  shift $((OPTIND - 1))
 
   local default_repo="https://github.com/<yourusername>/dotfiles"
   local default_local_path="${HOME}/.dotfiles"
-  local repo="$(yaml_get '.meta.repo' "$DOME_CONFIG")"
-  local final_path="$(yaml_get '.meta.local_path' "$DOME_CONFIG")"
-  
+  local repo
+  repo=$(yaml_get '.meta.repo' "$DOME_CONFIG" 2>/dev/null || echo "")
+  local final_path
+  final_path=$(yaml_get '.meta.local_path' "$DOME_CONFIG" 2>/dev/null || echo "")
+
   repo="${custom_repo:-${repo:-$default_repo}}"
   final_path="${custom_path:-${final_path:-$default_local_path}}"
+  # Force final_path under $HOME
+  final_path=$(resolve_path "$final_path")
 
   print_info "Initializing dotfile manager..."
-  mkdir -p "${HOME}/.config/dome"
+  mkdir -p "$(dirname "$DOME_CONFIG")"
 
   if [[ -f "$DOME_CONFIG" ]]; then
     print_info "Config file already exists: $DOME_CONFIG"
-    
-    [[ -n "$custom_repo" ]] && yaml_set '.meta.repo = "'"$custom_repo"'"' "$DOME_CONFIG" && print_success "Updated repo URL in config file."
-    [[ -n "$custom_path" ]] && yaml_set '.meta.local_path = "'"$custom_path"'"' "$DOME_CONFIG" && print_success "Updated local path in config file." && mkdir -p "$custom_path" && print_success "Created custom path: $custom_path"
-  else 
+    [[ -n "$custom_repo" ]] && {
+      yaml_set '.meta.repo = "'"$custom_repo"'"' "$DOME_CONFIG"
+      print_success "Updated repo URL in config file."
+    }
+    [[ -n "$custom_path" ]] && {
+      yaml_set '.meta.local_path = "'"$custom_path"'"' "$DOME_CONFIG"
+      print_success "Updated local path in config file."
+      mkdir -p "$final_path" && print_success "Created custom path: $final_path"
+    }
+  else
     cat >"$DOME_CONFIG" <<EOF
 meta:
   repo: "${custom_repo:-$default_repo}"
@@ -147,7 +218,11 @@ EOF
       return 1
     fi
     print_info "Cloning repository from ${repo} into $final_path"
-    git clone "${repo}" "$final_path" --branch "$(yaml_get '.meta.branch' "$DOME_CONFIG")" && print_success "Repository cloned successfully." || { print_error "Failed to clone repository from ${repo}"; return 1; }
+    git clone "${repo}" "$final_path" --branch "$(yaml_get '.meta.branch' "$DOME_CONFIG")" &&
+      print_success "Repository cloned successfully." || {
+      print_error "Failed to clone repository from ${repo}"
+      return 1
+    }
   else
     print_info "Repository already exists at $final_path"
     local ignore_file="${final_path}/.domeignore"
@@ -169,6 +244,7 @@ EOF
   print_notice "Next steps: Edit ${DOME_CONFIG} as needed and run 'dome sync'"
 }
 
+# Check if a file should be ignored based on .domeignore.
 is_ignored() {
   local file="$1" repo_root="$2" ignore_file="${repo_root}/.domeignore"
   [[ -f "$ignore_file" ]] || return 1
@@ -176,20 +252,13 @@ is_ignored() {
 
   while IFS= read -r pattern; do
     [[ -z "$pattern" || "$pattern" == \#* ]] && continue
-
-    # Handle negation patterns
     local negate=0
     if [[ "$pattern" == !* ]]; then
       negate=1
       pattern="${pattern:1}"
     fi
-
-    # Remove trailing slash for directory patterns
     pattern="${pattern%/}"
-
-    # Convert pattern to a regex
     pattern=$(echo "$pattern" | sed 's/[.[\*^$(){}?+|]/\\&/g; s/\*/.*/g; s/\?/./g; s/^/\\^/; s/$/\\$/')
-
     if [[ "$file" =~ $pattern ]]; then
       if [[ $negate -eq 1 ]]; then
         return 1
@@ -201,6 +270,7 @@ is_ignored() {
   return 1
 }
 
+# Print a formatted table row.
 print_table_row() {
   local file="$1" symlinked="$2" backuped="$3" header="${4:-false}"
   local file_color="reset" symlinked_color="reset" backuped_color="reset"
@@ -216,25 +286,29 @@ print_table_row() {
 
   local display_file
   [[ "$header" == "true" ]] && display_file="$file" || display_file=$(truncate_path "$file" $file_width)
-
   printf "${COLORS[$file_color]}%-${file_margin}s${COLORS[reset]} " "$display_file"
   printf "${COLORS[$symlinked_color]}%-${symlinked_width}s${COLORS[reset]} " "$symlinked"
   printf "${COLORS[$backuped_color]}%-${backuped_width}s${COLORS[reset]}\n" "$backuped"
 }
 
+# Create a symlink or copy a file—with backup—using the provided backup directory.
 link_or_copy_file() {
-  local source="$1" target="$2" snapshot="$3" no_backup="$4" verbose="$5"
+  local source="$1" target="$2" snapshot="$3" no_backup="$4" verbose="$5" backup_dir="$6"
   local symlinked="No" backuped="--"
   mkdir -p "$(dirname "$target")"
 
   if [[ -e "$target" && "$target" != "$source" ]]; then
     if [[ -L "$target" ]]; then
-      [[ "$(readlink "$target")" == "$source" && "$snapshot" != "true" ]] && symlinked="Yes" && [[ "$verbose" == "true" ]] && print_table_row "${target#$HOME/}" "$symlinked" "$backuped" && return 0
+      if [[ "$(readlink "$target")" == "$source" && "$snapshot" != "true" ]]; then
+        symlinked="Yes"
+        [[ "$verbose" == "true" ]] && print_table_row "${target#$HOME/}" "$symlinked" "$backuped"
+        return 0
+      fi
     fi
     if [[ "$no_backup" != "true" ]]; then
-      local backup="${BACKUP_DIR}/${target#$HOME/}"
+      local backup="${backup_dir}/${target#$HOME/}"
       mkdir -p "$(dirname "$backup")"
-      [[ "$verbose" != "true" ]] && print_warning "Backing up existing file: ${target} → ${backup}"
+      print_warning "Backing up existing file: ${target} → ${backup}"
       mv "$target" "$backup"
       backuped="$(basename "$backup")"
     else
@@ -243,10 +317,10 @@ link_or_copy_file() {
   fi
 
   if [[ "$snapshot" == "true" ]]; then
-    [[ "$verbose" != "true" ]] && print_copy "Copying file: ${source} → ${target}"
+    print_copy "Copying file: ${source} → ${target}"
     cp -f "$source" "$target"
   else
-    [[ "$verbose" != "true" ]] && print_link "Creating symlink: ${target} → ${source}"
+    print_link "Creating symlink: ${target} → ${source}"
     ln -sf "$source" "$target"
     symlinked="Yes"
   fi
@@ -254,53 +328,94 @@ link_or_copy_file() {
   [[ "$verbose" == "true" ]] && print_table_row "${target#$HOME/}" "$symlinked" "$backuped"
 }
 
+# Sync dotfiles using distro-specific configurations.
 sync_files() {
-  local repo_root=$(get_repo_root) distro=$(detect_distro)
-  local snapshot="${1:-false}" no_backup="${2:-false}" verbose="${3:-false}"
-  declare -A distro_map used_sources=()
+  local repo_root distro snapshot no_backup verbose backup_dir
+  repo_root=$(get_repo_root)
+  distro=$(detect_distro)
+  snapshot="${1:-false}"
+  no_backup="${2:-false}"
+  verbose="${3:-false}"
+  declare -A distro_map
 
-  [[ "$verbose" == "true" ]] && print_info "Syncing dotfiles (verbose mode)..." && echo && print_table_row "File" "Symlinked" "Backuped" "true" && printf "%-41s %-10s %-20s\n" "$(printf '%.0s-' {1..41})" "$(printf '%.0s-' {1..10})" "$(printf '%.0s-' {1..20})" || print_info "Detected distribution: ${distro}"
+  # Create a backup directory only if backups are enabled.
+  if [[ "$no_backup" != "true" ]]; then
+    backup_dir="${BACKUP_BASE_DIR}/${distro}/bak_$(date +%s)_$RANDOM"
+    mkdir -p "${BACKUP_BASE_DIR}/${distro}"
+  else
+    backup_dir=""
+  fi
 
+  if [[ "$verbose" == "true" ]]; then
+    print_info "Syncing dotfiles (verbose mode)..."
+    echo
+    print_table_row "File" "Symlinked" "Backuped" "true"
+    printf "%-41s %-10s %-20s\n" "$(printf '%.0s-' {1..41})" "$(printf '%.0s-' {1..10})" "$(printf '%.0s-' {1..20})"
+  else
+    print_info "Detected distribution: ${distro}"
+  fi
+
+  # Map each dotfile to its distro-specific source.
   while IFS= read -r key; do
-    local src=$(yaml_get ".distro_files[\"$key\"].$distro" "$DOME_CONFIG")
+    local src
+    src=$(yaml_get ".distro_files[\"$key\"].$distro" "$DOME_CONFIG")
     if [[ -n "$src" ]]; then
       distro_map["$key"]="$src"
-      used_sources["$src"]=1
       [[ "$verbose" != "true" ]] && print_notice "Using distro variant: ${key} → ${src}"
     fi
   done < <(yaml_get '.distro_files | keys | .[]' "$DOME_CONFIG")
 
   for key in "${!distro_map[@]}"; do
-    local src="${repo_root}/${distro_map[$key]}" target="${HOME}/${key}"
-    [[ -f "$src" ]] && link_or_copy_file "$src" "$target" "$snapshot" "$no_backup" "$verbose"
+    local src="${repo_root}/${distro_map[$key]}"
+    local target="${HOME}/${key}"
+    if [[ -f "$src" ]]; then
+      link_or_copy_file "$src" "$target" "$snapshot" "$no_backup" "$verbose" "$backup_dir"
+    fi
   done
 
   [[ "$verbose" == "true" ]] && echo
 }
 
+# Perform sync with improved option parsing.
 perform_sync() {
   local snapshot="false" no_backup="false" verbose="false"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -s|--snapshot) snapshot="true"; shift ;;
-      -n|--no-back) no_backup="true"; shift ;;
-      -v|--verbose) verbose="true"; shift ;;
-      *) shift ;;
+  while getopts "snv" opt; do
+    case "$opt" in
+    s) snapshot="true" ;;
+    n) no_backup="true" ;;
+    v) verbose="true" ;;
+    *) ;;
     esac
   done
-
+  shift $((OPTIND - 1))
   run_hook "pre_sync"
-  [[ "$snapshot" == "true" ]] && print_info "Starting sync in snapshot mode (copying files)..." || print_info "Starting sync in symlink mode..."
+  if [[ "$snapshot" == "true" ]]; then
+    print_info "Starting sync in snapshot mode (copying files)..."
+  else
+    print_info "Starting sync in symlink mode..."
+  fi
   [[ "$no_backup" == "true" ]] && print_notice "Backup creation is disabled"
   sync_files "$snapshot" "$no_backup" "$verbose"
   run_hook "post_sync"
   print_success "Sync completed successfully!"
 }
 
+# Revert dotfiles using backups organized per distro.
 revert_backup() {
-  print_info "Reverting to backed up dotfiles..."
   local backup_dir="${1:-}"
-  [[ -z "$backup_dir" ]] && print_error "No backup directory specified." && return 1
+  local distro
+  distro=$(detect_distro)
+  local backup_base="${BACKUP_BASE_DIR}/${distro}"
+
+  if [[ -z "$backup_dir" ]]; then
+    backup_dir=$(ls -td "${backup_base}"/bak_* 2>/dev/null | head -1 || true)
+    if [[ -z "$backup_dir" ]]; then
+      print_error "No backup directories found for distro ${distro}."
+      return 1
+    else
+      print_info "No backup directory specified. Using latest backup: $backup_dir"
+    fi
+  fi
 
   if [[ ! -d "$backup_dir" ]]; then
     print_error "Backup directory does not exist: $backup_dir"
@@ -309,6 +424,7 @@ revert_backup() {
 
   while IFS= read -r -d $'\0' backup_file; do
     local original_file="${HOME}/${backup_file#${backup_dir}/}"
+    mkdir -p "$(dirname "$original_file")"
     mv "$backup_file" "$original_file"
     print_success "Restored $original_file from $backup_file"
   done < <(find "$backup_dir" -type f -print0)
@@ -342,29 +458,29 @@ Commands:
   sync [options]     Sync dotfiles
   pull               Update from remote
   push               Publish changes
-  revert [dir]       Revert to backed up dotfiles from specified directory
+  revert [dir]       Revert to backed up dotfiles from specified directory (or latest backup for current distro)
   -h                 Show help
   -v                 Show version
 Init Options:
-  -p, --path         Custom local path for dotfiles
+  -p <path>          Custom local path for dotfiles (forced under \$HOME)
 Sync Options:
-  -s, --snapshot     Copy files
-  -n, --no-back      No backups
-  -v, --verbose      Verbose output
+  -s                 Snapshot mode (copy files)
+  -n                 No backups
+  -v                 Verbose output
 EOF
 }
 
 main() {
   local cmd="${1:-}"
-  shift 2>/dev/null || true
+  shift || true
   case "$cmd" in
-    init) initialize_dome "$@" ;;
-    sync) perform_sync "$@" ;;
-    pull) dome_pull ;;
-    push) dome_push ;;
-    revert) revert_backup "$@" ;;
-    -v) echo -e "${COLORS[bold]}dome ${DOME_VERSION}${COLORS[reset]}" ;;
-    -h|*) usage ;;
+  init) initialize_dome "$@" ;;
+  sync) perform_sync "$@" ;;
+  pull) dome_pull ;;
+  push) dome_push ;;
+  revert) revert_backup "$@" ;;
+  -v) echo -e "${COLORS[bold]}dome ${DOME_VERSION}${COLORS[reset]}" ;;
+  -h | *) usage ;;
   esac
 }
 
