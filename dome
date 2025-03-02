@@ -147,7 +147,8 @@ run_hook() {
 # If a custom path is provided via -p, the repository is forced to reside under $HOME.
 initialize_dome() {
   local custom_repo="" custom_path=""
-  if [[ $# -gt 0 && "$1" =~ ^(https?:\/\/|git@) ]]; then
+  # if [[ $# -gt 0 && "$1" =~ ^(https?:\/\/|git@) ]]; then
+  if [[ $# -gt 0 && "$1" =~ ^(https?:\/\/|git@|file:\/\/) ]]; then
     custom_repo="$1"
     shift
   fi
@@ -337,8 +338,9 @@ sync_files() {
   no_backup="${2:-false}"
   verbose="${3:-false}"
   declare -A distro_map
+  declare -A exclude_srcs=()
 
-  # Create a backup directory only if backups are enabled.
+  # Create backup directory only if backups are enabled
   if [[ "$no_backup" != "true" ]]; then
     backup_dir="${BACKUP_BASE_DIR}/${distro}/bak_$(date +%s)_$RANDOM"
     mkdir -p "${BACKUP_BASE_DIR}/${distro}"
@@ -355,23 +357,48 @@ sync_files() {
     print_info "Detected distribution: ${distro}"
   fi
 
-  # Map each dotfile to its distro-specific source.
+  # Map distro-specific files and collect sources to exclude
   while IFS= read -r key; do
     local src
     src=$(yaml_get ".distro_files[\"$key\"].$distro" "$DOME_CONFIG")
     if [[ -n "$src" ]]; then
       distro_map["$key"]="$src"
+      exclude_srcs["${repo_root}/${src}"]=1
       [[ "$verbose" != "true" ]] && print_notice "Using distro variant: ${key} → ${src}"
     fi
   done < <(yaml_get '.distro_files | keys | .[]' "$DOME_CONFIG")
 
+  # Process distro-specific files first
   for key in "${!distro_map[@]}"; do
     local src="${repo_root}/${distro_map[$key]}"
     local target="${HOME}/${key}"
-    if [[ -f "$src" ]]; then
+    if [[ -e "$src" ]]; then
       link_or_copy_file "$src" "$target" "$snapshot" "$no_backup" "$verbose" "$backup_dir"
     fi
   done
+
+  # Process all other repo items (files AND directories)
+  while IFS= read -r -d $'\0' repo_item; do
+    local rel_path="${repo_item#$repo_root/}"
+
+    # Skip excluded items
+    [[ -n "${exclude_srcs["$repo_item"]:-}" ]] && continue
+    is_ignored "$rel_path" "$repo_root" && continue
+
+    # Skip items under .git
+    [[ "$rel_path" == ".git/"* ]] && continue
+
+    local target="${HOME}/${rel_path}"
+
+    # Check if parent directory is already symlinked to repo
+    local parent_dir=$(dirname "$target")
+    if [[ -L "$parent_dir" && "$(readlink -f "$parent_dir")" == "$(dirname "$repo_item")" ]]; then
+      [[ "$verbose" == "true" ]] && print_info "Skipping $rel_path (parent directory already linked)"
+      continue
+    fi
+
+    link_or_copy_file "$repo_item" "$target" "$snapshot" "$no_backup" "$verbose" "$backup_dir"
+  done < <(find "$repo_root" -path "${repo_root}/.git" -prune -o \( -type f -o -type d \) -print0)
 
   [[ "$verbose" == "true" ]] && echo
 }
@@ -407,29 +434,50 @@ revert_backup() {
   distro=$(detect_distro)
   local backup_base="${BACKUP_BASE_DIR}/${distro}"
 
+  # Find latest backup if none specified
   if [[ -z "$backup_dir" ]]; then
     backup_dir=$(ls -td "${backup_base}"/bak_* 2>/dev/null | head -1 || true)
-    if [[ -z "$backup_dir" ]]; then
-      print_error "No backup directories found for distro ${distro}."
+    [[ -z "$backup_dir" ]] && {
+      print_error "No backups found for ${distro}"
       return 1
-    else
-      print_info "No backup directory specified. Using latest backup: $backup_dir"
-    fi
+    }
+    print_info "Using latest backup: $(truncate_path "$backup_dir" 50)"
   fi
 
-  if [[ ! -d "$backup_dir" ]]; then
-    print_error "Backup directory does not exist: $backup_dir"
+  [[ ! -d "$backup_dir" ]] && {
+    print_error "Invalid backup directory"
     return 1
-  fi
+  }
 
-  while IFS= read -r -d $'\0' backup_file; do
-    local original_file="${HOME}/${backup_file#${backup_dir}/}"
-    mkdir -p "$(dirname "$original_file")"
-    mv "$backup_file" "$original_file"
-    print_success "Restored $original_file from $backup_file"
-  done < <(find "$backup_dir" -type f -print0)
+  print_info "Restoring from backup: $(truncate_path "$backup_dir" 60)"
+  local restored_count=0
 
-  print_success "Reversion to backups completed!"
+  # Process both files and directories
+  while IFS= read -r -d $'\0' backup_item; do
+    local rel_path="${backup_item#$backup_dir/}"
+    local target="${HOME}/${rel_path}"
+
+    # Remove existing symlinks/files/dirs
+    if [[ -L "$target" ]]; then
+      rm -f "$target"
+    elif [[ -e "$target" ]]; then
+      rm -rf "$target"
+    fi
+
+    # Restore from backup
+    mkdir -p "$(dirname "$target")"
+    if [[ -d "$backup_item" ]]; then
+      cp -rf "$backup_item" "$(dirname "$target")"
+    else
+      mv "$backup_item" "$target"
+    fi
+
+    print_success "Restored: $(truncate_path "$target" 50)"
+    ((restored_count++))
+  done < <(find "$backup_dir" \( -type f -o -type d \) -print0)
+
+  print_success "Restored ${restored_count} items from backup"
+  run_hook "post_revert"
 }
 
 dome_pull() {
