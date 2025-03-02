@@ -1,87 +1,162 @@
 #!/usr/bin/env bats
 
-# Load the script to be tested
-load '/home/whybe/dome/dome'
+setup() {
+  # Create temporary directories and files
+  export TEMP_DIR=$(mktemp -d)
+  export HOME="$TEMP_DIR/home"
+  export REPO_DIR="$TEMP_DIR/repo"
+  mkdir -p "$HOME"
+  mkdir -p "$REPO_DIR"
 
-# Test truncate_path function
-@test "truncate_path short path" {
-  run truncate_path "/home/user/file.txt" 20
-  [ "$status" -eq 0 ]
-  [ "$output" = "/home/user/file.txt" ]
+  # Create fake git repo
+  cd "$REPO_DIR"
+  git init --quiet
+  # Add required git config
+  git config user.email "test@example.com"
+  git config user.name "Test User"
+  mkdir -p .config/sway .config/wofi
+  echo "test config" >.config/sway/config
+  echo "styles" >.config/wofi/styles.css
+  echo "alias ls='ls -lha'" >.bash_aliases.arch
+  echo "alias ll='ls -l'" >.bash_aliases.debian
+  echo "PS1='\$ '" >.bashrc
+  git add .
+  git commit -m "Initial commit" --quiet
+
+  # Create .domeignore
+  cat >.domeignore <<EOF
+.git/
+README.md
+LICENSE
+EOF
 }
 
-@test "truncate_path long path" {
-  run truncate_path "/home/user/very/long/path/to/file.txt" 20
-  [ "$status" -eq 0 ]
-  [ "$output" = ".../path/to/file.txt" ]
+teardown() {
+  rm -rf "$TEMP_DIR"
 }
 
-# Test spinner function
-@test "spinner function" {
-  run spinner $$ "Loading"
-  [ "$status" -eq 0 ]
+mock_distro() {
+  echo "arch"
 }
 
-# Test resolve_path function
-@test "resolve_path function" {
-  run resolve_path "~/test"
+@test "Initialize dome configuration" {
+  run dome init -p .dotfiles "file://$REPO_DIR"
   [ "$status" -eq 0 ]
-  [ "$output" = "$HOME/test" ]
+  [ -f "$HOME/.config/dome/config.yaml" ]
+
+  run yq eval '.meta.local_path' "$HOME/.config/dome/config.yaml"
+  [ "$output" = "~/.dotfiles" ]
 }
 
-# Test yaml_get function
-@test "yaml_get function" {
-  run yaml_get ".meta.repo" "/home/whybe/dome/test/config.yaml"
+@test "Sync in symlink mode" {
+  dome init -p .dotfiles "file://$REPO_DIR"
+  run dome sync -v
+
   [ "$status" -eq 0 ]
-  [ "$output" = "https://github.com/<yourusername>/dotfiles" ]
+  [ -L "$HOME/.bashrc" ]
+  [ -L "$HOME/.config/sway" ]
+  [ "$(readlink -f $HOME/.bash_aliases)" = "$REPO_DIR/.bash_aliases.arch" ]
+
+  # Verify ignored files not synced
+  [ ! -e "$HOME/.domeignore" ]
+  [ ! -e "$HOME/README.md" ]
 }
 
-# Test yaml_set function
-@test "yaml_set function" {
-  run yaml_set ".meta.repo = 'https://github.com/new/repo'" "/home/whybe/dome/test/config.yaml"
+@test "Sync in snapshot mode with backups" {
+  dome init -p .dotfiles "file://$REPO_DIR"
+
+  # Create existing files
+  echo "old config" >"$HOME/.bashrc"
+  mkdir -p "$HOME/.config/sway"
+  echo "old sway" >"$HOME/.config/sway/config"
+
+  run dome sync -sv
   [ "$status" -eq 0 ]
+
+  # Verify backups
+  local backup_dir="$HOME/.config/dome/backups/arch/bak_"*
+  [ -d "$backup_dir" ]
+  [ -f "$backup_dir/.bashrc" ]
+  [ -f "$backup_dir/.config/sway/config" ]
+
+  # Verify copies
+  [ -f "$HOME/.bashrc" ]
+  [ ! -L "$HOME/.bashrc" ]
+  [ "$(cat $HOME/.bashrc)" = "PS1='\$ '" ]
 }
 
-# Test get_repo_root function
-@test "get_repo_root function" {
-  run get_repo_root
+@test "Revert from backup" {
+  dome init -p .dotfiles "file://$REPO_DIR"
+
+  # Initial sync with snapshot
+  echo "original content" >"$HOME/.bashrc"
+  dome sync -s
+
+  # Modify after sync
+  echo "broken content" >"$HOME/.bashrc"
+
+  # Revert
+  run dome revert
   [ "$status" -eq 0 ]
-  [ "$output" = "$HOME/.dotfiles" ]
+  [ "$(cat $HOME/.bashrc)" = "original content" ]
 }
 
-# Test detect_distro function
-@test "detect_distro function" {
-  run detect_distro
+@test "Handle new files in repo" {
+  dome init -p .dotfiles "file://$REPO_DIR"
+  dome sync
+
+  # Add new file to repo
+  echo "new file" >"$REPO_DIR/.config/wofi/newfile.css"
+  (cd "$REPO_DIR" && git add . && git commit -m "Add new file" --quiet)
+
+  run dome sync
   [ "$status" -eq 0 ]
-  [[ "$output" =~ ^(arch|debian|fedora|generic)$ ]]
+  [ -L "$HOME/.config/wofi/newfile.css" ]
 }
 
-# Test run_hook function
-@test "run_hook function" {
-  run run_hook "pre_sync"
-  [ "$status" -eq 0 ]
+@test "Respect .domeignore" {
+  dome init -p .dotfiles "file://$REPO_DIR"
+  dome sync
+
+  [ ! -e "$HOME/.git" ]
+  [ ! -e "$HOME/README.md" ]
 }
 
-# Test initialize_dome function
-@test "initialize_dome function" {
-  run initialize_dome
-  [ "$status" -eq 0 ]
+@test "Handle directory symlinking" {
+  dome init -p .dotfiles "file://$REPO_DIR"
+  dome sync
+
+  # Verify directory symlink
+  [ -L "$HOME/.config/sway" ]
+  [ "$(readlink -f $HOME/.config/sway)" = "$REPO_DIR/.config/sway" ]
+
+  # Add file to repo directory
+  echo "test" >"$REPO_DIR/.config/sway/newfile"
+  dome sync
+
+  # Verify new file appears through symlink
+  [ -f "$HOME/.config/sway/newfile" ]
 }
 
-# Test perform_sync function
-@test "perform_sync function" {
-  run perform_sync
+@test "Snapshot mode backup structure" {
+  dome init -p .dotfiles "file://$REPO_DIR"
+
+  # Create existing files
+  mkdir -p "$HOME/.config/wofi"
+  echo "existing styles" >"$HOME/.config/wofi/styles.css"
+
+  run dome sync -s
   [ "$status" -eq 0 ]
+
+  local backup_dir="$HOME/.config/dome/backups/arch/bak_"*
+  [ -f "$backup_dir/.config/wofi/styles.css" ]
+  [ "$(cat $backup_dir/.config/wofi/styles.css)" = "existing styles" ]
 }
 
-# Test dome_pull function
-@test "dome_pull function" {
-  run dome_pull
-  [ "$status" -eq 0 ]
-}
+@test "Distro-specific file mapping" {
+  dome init -p .dotfiles "file://$REPO_DIR"
+  dome sync
 
-# Test dome_push function
-@test "dome_push function" {
-  run dome_push
-  [ "$status" -eq 0 ]
+  [ "$(readlink -f $HOME/.bash_aliases)" = "$REPO_DIR/.bash_aliases.arch" ]
+  [ ! -e "$HOME/.bash_aliases.debian" ]
 }
